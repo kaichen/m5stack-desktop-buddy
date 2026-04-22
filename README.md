@@ -22,10 +22,8 @@ waiting, and lets you approve or deny right from the device.
 
 ## Hardware
 
-The firmware targets ESP32 with the Arduino framework. As written, it
-depends on the M5StickCPlus library for its display, IMU, and button
-drivers—so you'll need that board, or a fork that swaps those drivers for
-your own pin layout.
+The firmware targets M5StickS3 with the Arduino framework and M5Unified for
+display, IMU, power, and button drivers.
 
 ## Flashing
 
@@ -73,8 +71,6 @@ If discovery isn't finding the stick:
 | **A** (front)           | next screen          | next screen | next screen | **approve** |
 | **B** (right)           | scroll transcript    | next page   | next page   | **deny**    |
 | **Hold A**              | menu                 | menu        | menu        | menu        |
-| **Power** (left, short) | toggle screen off    |             |             |             |
-| **Power** (left, ~6s)   | hard power off       |             |             |             |
 | **Shake**               | dizzy                |             |             | —           |
 | **Face-down**           | nap (energy refills) |             |             |             |
 

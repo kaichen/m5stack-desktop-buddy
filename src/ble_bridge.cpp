@@ -29,6 +29,11 @@ static volatile bool      connected = false;
 static volatile bool      secure = false;
 static volatile uint32_t  passkey = 0;
 static volatile uint16_t  mtu = 23;
+// Deferred re-advertise: calling BLEDevice::startAdvertising() directly inside
+// onDisconnect (BLE stack task context) often no-ops silently on this Arduino
+// BLE library, leaving the device invisible after the first disconnect. The
+// flag is consumed by bleTick() from the Arduino loop after a short settle.
+static volatile uint32_t  disconnectedAt = 0;
 
 static void rxPush(const uint8_t* p, size_t n) {
   for (size_t i = 0; i < n; i++) {
@@ -56,9 +61,8 @@ class ServerCallbacks : public BLEServerCallbacks {
     secure = false;
     passkey = 0;
     mtu = 23;
+    disconnectedAt = millis();
     Serial.println("[ble] disconnected");
-    // Restart advertising so the next client can find us.
-    BLEDevice::startAdvertising();
   }
   void onMtuChanged(BLEServer*, esp_ble_gatts_cb_param_t* param) override {
     mtu = param->mtu.mtu;
@@ -136,6 +140,16 @@ void bleInit(const char* deviceName) {
 bool bleConnected() { return connected; }
 bool bleSecure()    { return secure; }
 uint32_t blePasskey() { return passkey; }
+
+void bleTick() {
+  // 500 ms settle lets the BLE stack finish tearing down the prior link
+  // before we re-arm the advertiser; without it the call no-ops.
+  if (disconnectedAt && !connected && millis() - disconnectedAt > 500) {
+    BLEDevice::startAdvertising();
+    disconnectedAt = 0;
+    Serial.println("[ble] re-advertising");
+  }
+}
 
 void bleClearBonds() {
   int n = esp_ble_get_bond_device_num();

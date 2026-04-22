@@ -15,6 +15,9 @@
 // snapshots) are written via bleWrite() and chunked to the negotiated MTU.
 
 void bleInit(const char* deviceName);
+// Pump deferred BLE work from the main loop. Currently restarts advertising
+// after a disconnect; safe and cheap to call every loop iteration.
+void bleTick();
 bool bleConnected();
 // True once LE Secure Connections bonding has completed for the current
 // link. The NUS characteristics are encrypted-only, so in practice this
