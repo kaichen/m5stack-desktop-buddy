@@ -1,22 +1,33 @@
-# Hardware Buddy BLE Protocol
+# Desktop Buddy BLE Protocol
 
-This is the wire protocol the Claude desktop apps speak over Bluetooth LE.
+This is the wire protocol a **bridge** (a desktop app or CLI that watches
+a coding agent) speaks to a **buddy device** (this firmware or any
+compatible reimplementation) over Bluetooth LE. The protocol is
+agent-neutral — it describes session counts, permission prompts, and
+transcript snippets, without caring whether the underlying agent is
+Claude, Codex, Aider, Cursor, Cline, or anything else.
+
 You don't need anything from this repository to implement it. Any device
-that can advertise the Nordic UART Service and parse newline-delimited JSON
-will work: Arduino, ESP32, nRF52, a Raspberry Pi with a BLE dongle.
+that can advertise the Nordic UART Service and parse newline-delimited
+JSON will work: Arduino, ESP32, nRF52, a Raspberry Pi with a BLE dongle.
 
-## Enabling the bridge
+See [BRIDGES.md](BRIDGES.md) for the current list of bridges and the state
+of each integration.
 
-The BLE bridge is off by default. In Claude for macOS or Windows:
+## Enabling a bridge
 
-1. **Help → Troubleshooting → Enable Developer Mode** — adds a **Developer**
-   menu to the menu bar.
+Each bridge has its own enable flow. For the Claude desktop app (macOS
+and Windows):
+
+1. **Help → Troubleshooting → Enable Developer Mode** — adds a
+   **Developer** menu to the menu bar.
 2. **Developer → Open Hardware Buddy…** — opens the pairing window.
 3. Click **Connect** and pick your device from the scan list. The OS will
    prompt for Bluetooth permission on first use.
 
-Once paired the bridge auto-reconnects in the background; you only need the
-window open for initial pairing, the stats panel, or the folder drop target.
+Once paired the bridge auto-reconnects in the background; you only need
+the window open for initial pairing, the stats panel, or the folder drop
+target.
 
 ## Transport
 
@@ -25,22 +36,27 @@ window open for initial pairing, the stats panel, or the folder drop target.
 |                               | UUID                                   |
 | ----------------------------- | -------------------------------------- |
 | Service                       | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` |
-| RX (desktop → device, write)  | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
-| TX (device → desktop, notify) | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
+| RX (bridge → device, write)   | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
+| TX (device → bridge, notify)  | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
 
-Advertise a name starting with `Claude` over the Nordic UART Service so the
-device picker can filter to you. Appending a few bytes of your BT MAC keeps
-multiple devices distinguishable in the picker.
+Advertise a device name with a short, stable prefix that identifies your
+firmware family, followed by a few bytes of your BT MAC so multiple
+devices stay distinguishable in the picker. This reference firmware
+currently advertises as `Claude-XXXX` for compatibility with the Claude
+desktop app's device filter; a future revision will switch to a
+bridge-neutral prefix. Bridges should prefer the NUS service UUID for
+filtering, not the name.
 
-Everything on the wire is UTF-8 JSON—one object per line, terminated with
-`\n`. The desktop reassembles multi-packet lines on its end (notifications
-fragment at the MTU boundary, just send the bytes). Your device needs to do
-the same: accumulate bytes until you see `\n`, then parse.
+Everything on the wire is UTF-8 JSON — one object per line, terminated
+with `\n`. The bridge reassembles multi-packet lines on its end
+(notifications fragment at the MTU boundary, just send the bytes). Your
+device needs to do the same: accumulate bytes until you see `\n`, then
+parse.
 
 ## Heartbeat snapshot
 
-The desktop apps send a heartbeat snapshot whenever something changes, plus
-a keepalive every 10 seconds:
+The bridge sends a heartbeat snapshot whenever something changes, plus a
+keepalive every 10 seconds:
 
 ```json
 {
@@ -66,7 +82,7 @@ a keepalive every 10 seconds:
 | `waiting`      | Sessions blocked on a permission prompt                                           |
 | `msg`          | One-line summary suitable for a small display                                     |
 | `entries`      | Recent transcript lines, newest first (capped to a few)                           |
-| `tokens`       | Cumulative output tokens since the desktop app started                            |
+| `tokens`       | Cumulative output tokens since the bridge started                                 |
 | `tokens_today` | Output tokens since local midnight (persisted, survives restart)                  |
 | `prompt`       | Only present when a permission decision is needed. The `id` is what you echo back |
 
@@ -80,10 +96,12 @@ dead.
 
 ## Turn events
 
-Each completed turn also fires a one-shot event containing the raw SDK
-content array—text blocks, tool calls, and any other content from the
+Each completed turn also fires a one-shot event containing the raw
+content array — text blocks, tool calls, and any other content from the
 message. Events that serialize larger than 4KB are dropped (measured in
-UTF-8 bytes, not character count).
+UTF-8 bytes, not character count). The content array shape follows the
+Anthropic SDK convention; bridges for other agents should map their
+native format into this shape (or omit turn events if they can't).
 
 ```json
 {
@@ -102,8 +120,9 @@ When `prompt` is present, your device can return a response. Send one of:
 {"cmd":"permission","id":"req_abc123","decision":"deny"}
 ```
 
-The `id` must match `prompt.id` exactly. The desktop forwards this to the
-session manager: `"once"` approves the tool call, `"deny"` rejects it.
+The `id` must match `prompt.id` exactly. The bridge forwards this to the
+agent's permission subsystem: `"once"` approves the tool call, `"deny"`
+rejects it.
 
 ## One-shot on connect
 
@@ -121,7 +140,7 @@ Owner name (the user's first name from their account):
 
 ## Commands and acks
 
-Any command the desktop sends with a `cmd` field expects a matching ack:
+Any command the bridge sends with a `cmd` field expects a matching ack:
 
 ```json
 { "ack": "<same as cmd>", "ok": true, "n": 0 }
@@ -137,8 +156,8 @@ generic counter (e.g. bytes written for chunk acks, otherwise 0).
 | `{"cmd":"owner","name":"Felix"}` | sets owner name          | `{"ack":"owner","ok":true}`  |
 | `{"cmd":"unpair"}`               | erase stored BLE bonds   | `{"ack":"unpair","ok":true}` |
 
-**Status response.** The desktop polls this every couple of seconds to
-populate the Hardware Buddy window's stats panel:
+**Status response.** The bridge polls this every couple of seconds to
+populate its stats panel:
 
 ```json
 {
@@ -158,67 +177,70 @@ You can omit fields you don't have. `bat.mA` negative means charging.
 
 ## Folder push
 
-The Hardware Buddy window has a drop target. Dropping a folder there streams
-its flat contents to your device. The transport is content-agnostic: GIFs,
-config blobs, firmware images, whatever you want under 1.8MB total.
+A bridge may expose a drop target that streams the flat contents of a
+folder to your device. The transport is content-agnostic: GIFs, config
+blobs, firmware images, whatever you want under 1.8MB total.
 
 ```
-desktop:  {"cmd":"char_begin","name":"bufo","total":184320}
-device:   {"ack":"char_begin","ok":true}
+bridge:  {"cmd":"char_begin","name":"bufo","total":184320}
+device:  {"ack":"char_begin","ok":true}
 
-desktop:  {"cmd":"file","path":"manifest.json","size":412}
-device:   {"ack":"file","ok":true}
-desktop:  {"cmd":"chunk","d":"<base64>"}
-device:   {"ack":"chunk","ok":true,"n":<bytes_written_so_far>}
-          ...repeat chunk until file is done...
-desktop:  {"cmd":"file_end"}
-device:   {"ack":"file_end","ok":true,"n":<final_size>}
+bridge:  {"cmd":"file","path":"manifest.json","size":412}
+device:  {"ack":"file","ok":true}
+bridge:  {"cmd":"chunk","d":"<base64>"}
+device:  {"ack":"chunk","ok":true,"n":<bytes_written_so_far>}
+         ...repeat chunk until file is done...
+bridge:  {"cmd":"file_end"}
+device:  {"ack":"file_end","ok":true,"n":<final_size>}
 
-          ...repeat file/chunk/file_end for each file...
+         ...repeat file/chunk/file_end for each file...
 
-desktop:  {"cmd":"char_end"}
-device:   {"ack":"char_end","ok":true}
+bridge:  {"cmd":"char_end"}
+device:  {"ack":"char_end","ok":true}
 ```
 
-The desktop sends every regular file in the folder (no recursion, dotfiles
-skipped), base64-encodes each chunk, and waits for each ack before sending
-the next. You decode and append; the protocol is sequential so you don't
-need to buffer whole files.
+The bridge sends every regular file in the folder (no recursion, dotfiles
+skipped), base64-encodes each chunk, and waits for each ack before
+sending the next. You decode and append; the protocol is sequential so
+you don't need to buffer whole files.
 
 `char_begin.name` is whatever the folder is called, unless the folder
-contains a `manifest.json` with a `"name"` field, in which case that wins.
+contains a `manifest.json` with a `"name"` field, in which case that
+wins.
 
 If your device doesn't want pushed files, don't ack `char_begin`. The
-desktop times out after a few seconds and tells the user it failed.
+bridge times out after a few seconds and tells the user it failed.
 
 ## Security and pairing
 
-The desktop app connects whether or not your device requests link
-encryption, but transcript snippets and tool-call hints flow over this
-link, so an unencrypted device is sniffable by anyone in radio range
-with a cheap nRF dongle. You should require **LE Secure Connections
-bonding**: mark your NUS characteristics (and the TX CCCD) as
-encrypted-only and advertise DisplayOnly IO capability. The first GATT
-access then triggers OS pairing — the desktop prompts the user for the
-6-digit passkey your device displays — and the link is AES-CCM-encrypted
-from then on. Reconnects reuse the stored LTK without re-prompting.
+A bridge may connect whether or not your device requests link encryption,
+but transcript snippets and tool-call hints flow over this link, so an
+unencrypted device is sniffable by anyone in radio range with a cheap
+nRF dongle. You should require **LE Secure Connections bonding**: mark
+your NUS characteristics (and the TX CCCD) as encrypted-only and
+advertise DisplayOnly IO capability. The first GATT access then triggers
+OS pairing — the bridge prompts the user for the 6-digit passkey your
+device displays — and the link is AES-CCM-encrypted from then on.
+Reconnects reuse the stored LTK without re-prompting.
 
-The desktop app supports both encrypted and unencrypted devices. Two
-protocol hooks tie into pairing:
+Bridges are expected to support both encrypted and unencrypted devices.
+Two protocol hooks tie into pairing:
 
 - Include `"sec": true` in your status ack's `data` once the link is
   encrypted (or `false`/omit it if you don't bond).
-- Handle `{"cmd":"unpair"}` by erasing your stored bonds. The desktop
+- Handle `{"cmd":"unpair"}` by erasing your stored bonds. The bridge
   sends this when the user clicks **Forget**, so the next pairing shows
   a fresh passkey. Ack it like any other command.
 
 If you accept the folder-push protocol, validate `file.path` before
-writing — the desktop sends whatever filenames are in the dropped
-folder, so reject `..` and absolute paths unless your filesystem holds
-nothing you'd mind overwritten.
+writing — the bridge sends whatever filenames are in the dropped folder,
+so reject `..` and absolute paths unless your filesystem holds nothing
+you'd mind overwritten.
 
 ## Availability
 
-The BLE API is only available when the desktop apps are in developer mode
-(**Help → Troubleshooting → Enable Developer Mode**). It's intended for
-makers and developers and isn't an officially supported product feature.
+The Claude BLE bridge is only available when the desktop apps are in
+developer mode (**Help → Troubleshooting → Enable Developer Mode**). It's
+intended for makers and developers and isn't an officially supported
+product feature. Availability for other agent bridges varies — see
+[BRIDGES.md](BRIDGES.md).

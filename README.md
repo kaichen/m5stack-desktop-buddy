@@ -1,29 +1,38 @@
-# claude-desktop-buddy
+# m5stack-desktop-buddy
 
-Claude for macOS and Windows can connect Claude Cowork and Claude Code to
-maker devices over BLE, so developers and makers can build hardware that
-displays permission prompts, recent messages, and other interactions. We've
-been impressed by the creativity of the maker community around Claude -
-providing a lightweight, opt-in API is our way of making it easier to build
-fun little hardware devices that integrate with Claude.
+> Forked from
+> [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)
+> and generalized to support multiple coding agents, not just Claude.
 
-> **Building your own device?** You don't need any of the code here. See
-> **[REFERENCE.md](REFERENCE.md)** for the wire protocol: Nordic UART
+A hardware desk pet for coding agents. The firmware runs on M5Stack
+(currently M5StickS3) devices and speaks a simple, agent-neutral BLE
+protocol so any desktop app or CLI bridge can push session state,
+permission prompts, and transcript snippets to the device — and read
+approvals back.
+
+The first supported bridge is the **Claude** desktop app (Cowork / Claude
+Code). More coding agents are planned — see [BRIDGES.md](BRIDGES.md) for the
+current compatibility list and how to add a new one.
+
+> **Building your own device?** You don't need any of the firmware here.
+> See **[REFERENCE.md](REFERENCE.md)** for the wire protocol: Nordic UART
 > Service UUIDs, JSON schemas, and the folder push transport.
 
-As an example, we built a desk pet on ESP32 that lives off permission
-approvals and interaction with Claude. It sleeps when nothing's happening,
-wakes when sessions start, gets visibly impatient when an approval prompt is
-waiting, and lets you approve or deny right from the device.
+The reference build is a desk pet that lives off agent activity. It sleeps
+when nothing's happening, wakes when sessions start, gets visibly
+impatient when an approval prompt is waiting, and lets you approve or
+deny right from the device.
 
 <p align="center">
-  <img src="docs/device.jpg" alt="M5StickC Plus running the buddy firmware" width="500">
+  <img src="docs/device.jpg" alt="M5StickS3 running the buddy firmware" width="500">
 </p>
 
 ## Hardware
 
-The firmware targets M5StickS3 with the Arduino framework and M5Unified for
-display, IMU, power, and button drivers.
+The firmware targets **M5StickS3** with the Arduino framework and
+M5Unified for display, IMU, power, and button drivers. Ports to other
+M5Stack boards (Core2, AtomS3, etc.) are welcome — the codebase is
+structured around M5Unified so most drivers carry over.
 
 ## Flashing
 
@@ -46,11 +55,12 @@ Once running, you can also wipe everything from the device itself: **hold A
 
 ## Pairing
 
-To pair your device with Claude, first enable developer mode (**Help →
-Troubleshooting → Enable Developer Mode**). Then, open the Hardware Buddy
-window in **Developer → Open Hardware Buddy…**, click **Connect**, and pick
-your device from the list. macOS will prompt for Bluetooth permission on
-first connect; grant it.
+Pairing flow depends on which bridge you use. For the Claude desktop app:
+
+1. **Help → Troubleshooting → Enable Developer Mode**
+2. **Developer → Open Hardware Buddy…**, click **Connect**, pick your
+   device from the list.
+3. Grant Bluetooth permission on first connect.
 
 <p align="center">
   <img src="docs/menu.png" alt="Developer → Open Hardware Buddy… menu item" width="420">
@@ -59,10 +69,12 @@ first connect; grant it.
 
 Once paired, the bridge auto-reconnects whenever both sides are awake.
 
-If discovery isn't finding the stick:
+If discovery isn't finding the device:
 
 - Make sure it's awake (any button press)
-- Check the stick's settings menu → bluetooth is on
+- Check settings menu → bluetooth is on
+
+For other bridges, see [BRIDGES.md](BRIDGES.md).
 
 ## Controls
 
@@ -86,9 +98,9 @@ Choice persists to NVS.
 ## GIF pets
 
 If you want a custom GIF character instead of an ASCII buddy, drag a
-character pack folder onto the drop target in the Hardware Buddy window. The
-app streams it over BLE and the stick switches to GIF mode live. **Settings
-→ delete char** reverts to ASCII mode.
+character pack folder onto the bridge's drop target. The bridge streams it
+over BLE and the device switches to GIF mode live. **Settings → delete
+char** reverts to ASCII mode.
 
 A character pack is a folder with `manifest.json` and 96px-wide GIFs:
 
@@ -140,10 +152,14 @@ If you're iterating on a character and would rather skip the BLE round-trip,
 | `sleep`     | bridge not connected        | eyes closed, slow breathing |
 | `idle`      | connected, nothing urgent   | blinking, looking around    |
 | `busy`      | sessions actively running   | sweating, working           |
-| `attention` | approval pending            | alert, **LED blinks**       |
+| `attention` | approval pending            | alert, LED/chirp            |
 | `celebrate` | level up (every 50K tokens) | confetti, bouncing          |
-| `dizzy`     | you shook the stick         | spiral eyes, wobbling       |
+| `dizzy`     | you shook the device        | spiral eyes, wobbling       |
 | `heart`     | approved in under 5s        | floating hearts             |
+
+States are driven entirely by the agent-neutral heartbeat snapshot
+documented in [REFERENCE.md](REFERENCE.md) — any bridge that can produce
+one can drive the full behavior.
 
 ## Project layout
 
@@ -159,10 +175,22 @@ src/
   stats.h        — NVS-backed stats, settings, owner, species choice
 characters/      — example GIF character packs
 tools/           — generators and converters
+docs/            — images used by README
 ```
+
+## Docs
+
+- [REFERENCE.md](REFERENCE.md) — BLE wire protocol (agent-neutral)
+- [BRIDGES.md](BRIDGES.md) — supported bridges + how to add one
+- [HARDWARE_ROADMAP.md](HARDWARE_ROADMAP.md) — unused M5StickS3 board
+  capabilities and proposed features
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how this repo takes (or doesn't
+  take) contributions
 
 ## Availability
 
-The BLE API is only available when the desktop apps are in developer mode
-(**Help → Troubleshooting → Enable Developer Mode**). It's intended for
-makers and developers and isn't an officially supported product feature.
+The Claude BLE bridge is only available when the desktop apps are in
+developer mode (**Help → Troubleshooting → Enable Developer Mode**). It's
+intended for makers and developers and isn't an officially supported
+product feature. Availability for other agent bridges varies — see
+[BRIDGES.md](BRIDGES.md).
