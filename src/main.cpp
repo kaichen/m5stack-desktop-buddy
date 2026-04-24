@@ -26,7 +26,14 @@ static inline int boardUsbMilliVolts() {
   return mv > 0 ? mv : 0;
 }
 static inline bool boardOnUsb() {
-  return boardUsbMilliVolts() > 4000;
+  // VBUS voltage first — clean when it works. M5StickS3 reads it via I2C
+  // from the PM1 chip (reg 0x24/0x25), which occasionally glitches to 0.
+  if (boardUsbMilliVolts() > 3500) return true;
+  // M5Unified hardcodes getBatteryCurrent() to 0 on ESP32-S3, so the
+  // ground truth is the dedicated charging-status pin PM1_G0 exposed via
+  // isCharging(). Falls to is_discharging once the cell is topped off,
+  // so keep the VBUS check as the primary signal.
+  return M5.Power.isCharging() == m5::Power_Class::is_charging;
 }
 
 // Advertise as "Claude-XXXX" (last two BT MAC bytes) so multiple sticks
@@ -61,6 +68,7 @@ PersonaState baseState   = P_SLEEP;
 PersonaState activeState = P_SLEEP;
 uint32_t     oneShotUntil = 0;
 uint32_t     lastShakeCheck = 0;
+uint32_t     lastDizzyShake = 0;
 unsigned long t = 0;
 
 // Menu
@@ -109,6 +117,12 @@ const uint32_t SCREEN_OFF_MS = 30000;
 bool     napping = false;
 uint32_t napStartMs = 0;
 uint32_t promptArrivedMs = 0;
+const float    SHAKE_LINEAR_G = 0.85f;
+const float    SHAKE_REVERSE_DOT = -0.25f;
+const uint8_t  SHAKE_REVERSALS_REQUIRED = 2;
+const uint32_t SHAKE_GESTURE_WINDOW_MS = 650;
+const uint32_t SHAKE_HIT_GAP_MS = 250;
+const uint32_t SHAKE_DIZZY_COOLDOWN_MS = 5000;
 
 // Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
 // StickS3's IMU shares the M5Unified accel convention used by clockUpdateOrient
@@ -435,6 +449,43 @@ static const char* const MON[] = {
 static const char* const DOW[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
 
 static uint8_t clockDow() { return _clkDt.weekDay % 7; }
+
+// Small horizontal pill battery with an animated sweep band while charging.
+// Shown on the idle clock face so "plugged in and topping up" is visible at
+// a glance without eating into the time readout. The sweep is wall-clock
+// driven so it keeps moving even if the outer draw is seconds-gated.
+static void drawChargeIcon(int cx, int cy, const Palette& p) {
+  int vBat_mV = (int)M5.Power.getBatteryVoltage();
+  int iBat_mA = (int)M5.Power.getBatteryCurrent();
+  int pct = (vBat_mV - 3200) / 10;
+  if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+  bool charging = iBat_mA > 1;
+  bool full = vBat_mV > 4100 && iBat_mA < 10;
+
+  const int BW = 40, BH = 12;
+  int bx = cx - BW / 2, by = cy - BH / 2;
+  spr.fillRect(bx - 1, by - 1, BW + 4, BH + 2, p.bg);
+  spr.drawRect(bx, by, BW, BH, p.textDim);
+  spr.fillRect(bx + BW, by + 3, 2, BH - 6, p.textDim);
+
+  int innerW = BW - 4;
+  uint16_t col = full ? GREEN : (charging ? p.body : p.textDim);
+  int fillW = innerW * pct / 100;
+  if (fillW > 0) spr.fillRect(bx + 2, by + 2, fillW, BH - 4, col);
+
+  if (charging && !full) {
+    int sweepX = bx + 2 + (int)((millis() / 30) % innerW);
+    spr.fillRect(sweepX, by + 2, 2, BH - 4, p.text);
+  }
+
+  spr.setTextDatum(ML_DATUM);
+  spr.setTextSize(1);
+  spr.setTextColor(full ? GREEN : (charging ? p.text : p.textDim), p.bg);
+  char lbl[6]; snprintf(lbl, sizeof(lbl), "%d%%", pct);
+  spr.drawString(lbl, bx + BW + 6, by + BH / 2);
+  spr.setTextDatum(TL_DATUM);
+}
+
 static void drawClock() {
   const Palette& p = characterPalette();
   char hm[6]; snprintf(hm, sizeof(hm), "%02u:%02u", _clkTm.hours, _clkTm.minutes);
@@ -448,10 +499,21 @@ static void drawClock() {
     // via peek mode. Clearing from 90 leaves both untouched.
     spr.fillRect(0, 90, W, H - 90, p.bg);
     spr.setTextDatum(MC_DATUM);
-    spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 140);
-    spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 175);
-    spr.setTextSize(1);                                     spr.drawString(dl, CX, 200);
-    spr.setTextDatum(TL_DATUM);
+    if (dataRtcValid()) {
+      spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 140);
+      spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 175);
+      spr.setTextSize(1);                                     spr.drawString(dl, CX, 200);
+      spr.setTextDatum(TL_DATUM);
+      drawChargeIcon(CX - 8, 222, p);
+    } else {
+      // No RTC yet: pure standby-while-charging page. Keep it dead simple —
+      // a label and the animated battery in the usual time slot so the
+      // sweep band is the whole point of the screen.
+      spr.setTextSize(1); spr.setTextColor(p.textDim, p.bg);
+      spr.drawString("standby", CX, 130);
+      spr.setTextDatum(TL_DATUM);
+      drawChargeIcon(CX - 8, 170, p);
+    }
     return;
   }
 
@@ -518,10 +580,46 @@ void triggerOneShot(PersonaState s, uint32_t durMs) {
 bool checkShake() {
   float ax, ay, az;
   if (!M5.Imu.getAccelData(&ax, &ay, &az)) return false;
-  // Resting magnitude is ~1g; >1.5g means a clear yank/jolt. Single-sample
-  // threshold is fine because the oneShot guard in loop() debounces repeats.
+  uint32_t now = millis();
   float mag = sqrtf(ax*ax + ay*ay + az*az);
-  return mag > 1.5f;
+  float linear = fabsf(mag - 1.0f);
+  static uint8_t reversals = 0;
+  static uint32_t gestureStart = 0;
+  static uint32_t lastShakeHit = 0;
+  static float lastX = 0.0f, lastY = 0.0f, lastZ = 0.0f;
+
+  auto resetShakeGesture = [&]() {
+    reversals = 0;
+    gestureStart = 0;
+    lastShakeHit = 0;
+    lastX = lastY = lastZ = 0.0f;
+  };
+
+  if (linear <= SHAKE_LINEAR_G) return false;
+
+  if (mag < 0.001f
+      || (gestureStart && now - gestureStart > SHAKE_GESTURE_WINDOW_MS)
+      || (lastShakeHit && now - lastShakeHit > SHAKE_HIT_GAP_MS)) {
+    resetShakeGesture();
+  }
+
+  float nx = ax / mag, ny = ay / mag, nz = az / mag;
+  if (!gestureStart) {
+    gestureStart = now;
+    lastShakeHit = now;
+    lastX = nx; lastY = ny; lastZ = nz;
+    return false;
+  }
+
+  float dot = nx * lastX + ny * lastY + nz * lastZ;
+  lastShakeHit = now;
+  lastX = nx; lastY = ny; lastZ = nz;
+  if (dot > SHAKE_REVERSE_DOT) return false;
+
+  reversals++;
+  if (reversals < SHAKE_REVERSALS_REQUIRED) return false;
+  resetShakeGesture();
+  return true;
 }
 
 
@@ -1056,8 +1154,15 @@ void loop() {
   // shake → dizzy + force scenario advance
   if (now - lastShakeCheck > 50) {
     lastShakeCheck = now;
-    if (!menuOpen && !screenOff && checkShake() && (int32_t)(now - oneShotUntil) >= 0) {
+    bool promptActive = tama.promptId[0] && !responseSent;
+    bool canShakeDizzy = displayMode == DISP_NORMAL
+                      && !menuOpen && !settingsOpen && !resetOpen
+                      && !promptActive && !screenOff
+                      && (int32_t)(now - oneShotUntil) >= 0
+                      && now - lastDizzyShake > SHAKE_DIZZY_COOLDOWN_MS;
+    if (canShakeDizzy && checkShake()) {
       wake();
+      lastDizzyShake = now;
       triggerOneShot(P_DIZZY, 2000);
       Serial.println("shake: dizzy");
     }
@@ -1179,13 +1284,22 @@ void loop() {
   // by the bridge. Pet sleeps underneath. Exit restores Y via
   // applyDisplayMode() so the next mode-switch isn't visually offset.
   clockRefreshRtc();   // 1Hz internal throttle; also caches _onUsb
+  // Plugging in USB while the screen is asleep should bring it back —
+  // otherwise the user sees black until they hit a button, which is
+  // the exact failure mode we're trying to kill with the standby page.
+  static bool prevOnUsb = false;
+  if (_onUsb && !prevOnUsb) wake();
+  prevOnUsb = _onUsb;
   // Show the clock when nothing is happening — bridge heartbeat alone
   // doesn't count as activity (it's the only way to get the RTC synced).
   bool clocking = displayMode == DISP_NORMAL
                && !menuOpen && !settingsOpen && !resetOpen && !inPrompt
                && tama.sessionsRunning == 0 && tama.sessionsWaiting == 0
-               && dataRtcValid() && _onUsb;
-  if (clocking) clockUpdateOrient();
+               && _onUsb;
+  // Landscape flip only makes sense with a real time to show. Without RTC
+  // the page is just a standby badge, so pin portrait so the "sideways
+  // clock" handoff doesn't kick in and paint nonsense.
+  if (clocking && dataRtcValid()) clockUpdateOrient();
   else { clockOrient = 0; orientFrames = 0; paintedOrient = 0; }
   bool landscapeClock = clocking && clockOrient != 0;
 
