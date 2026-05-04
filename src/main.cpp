@@ -1,4 +1,8 @@
-#include <M5Unified.h>
+#if defined(BUDDY_CARDPUTER_ADV)
+  #include <M5Cardputer.h>
+#else
+  #include <M5Unified.h>
+#endif
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "ble_bridge.h"
@@ -36,6 +40,45 @@ static inline bool boardOnUsb() {
   return M5.Power.isCharging() == m5::Power_Class::is_charging;
 }
 
+// ──────────────── Cardputer ADV keyboard shim ────────────────
+// Cardputer ADV has no A/B buttons; map the TCA8418 I2C keyboard to:
+//   Enter      → BtnA (approve / next / wake)
+//   Backspace  → BtnB (deny / scroll)
+// On other boards (M5StickC S3) these helpers compile down to constant
+// `false`, so the existing Btn-based control flow is unchanged.
+#if defined(BUDDY_CARDPUTER_ADV)
+static bool     kbdEnter      = false;
+static bool     kbdEnterPrev  = false;
+static uint32_t kbdEnterDownT = 0;
+static bool     kbdDel        = false;
+static bool     kbdDelPrev    = false;
+static void updateCardputerKbd() {
+  auto& ks = M5Cardputer.Keyboard.keysState();
+  kbdEnterPrev = kbdEnter;
+  kbdDelPrev   = kbdDel;
+  kbdEnter     = ks.enter;
+  kbdDel       = ks.del;
+  if (kbdEnter && !kbdEnterPrev) kbdEnterDownT = millis();
+  if (!kbdEnter)                 kbdEnterDownT = 0;
+}
+static inline bool kbdEnterDown()              { return kbdEnter; }
+static inline bool kbdEnterPressed()           { return kbdEnter && !kbdEnterPrev; }
+static inline bool kbdEnterReleased()          { return !kbdEnter && kbdEnterPrev; }
+static inline bool kbdEnterPressedFor(uint32_t ms) {
+  return kbdEnter && kbdEnterDownT && (millis() - kbdEnterDownT >= ms);
+}
+static inline bool kbdDelDown()                { return kbdDel; }
+static inline bool kbdDelPressed()             { return kbdDel && !kbdDelPrev; }
+#else
+static inline void updateCardputerKbd() {}
+static inline bool kbdEnterDown()              { return false; }
+static inline bool kbdEnterPressed()           { return false; }
+static inline bool kbdEnterReleased()          { return false; }
+static inline bool kbdEnterPressedFor(uint32_t) { return false; }
+static inline bool kbdDelDown()                { return false; }
+static inline bool kbdDelPressed()             { return false; }
+#endif
+
 // Advertise as "Claude-XXXX" (last two BT MAC bytes) so multiple sticks
 // in one room are distinguishable in the desktop picker. Name persists in
 // btName for the BLUETOOTH info page.
@@ -49,9 +92,17 @@ static void startBt() {
 
 #include "character.h"
 #include "stats.h"
+// M5StickC S3 is portrait 135x240 (rotation 0). Cardputer ADV is
+// landscape 240x135 (rotation 1). Sprite geometry is selected at compile
+// time; the rest of the UI just consumes W/H/CY_BASE.
+#if defined(BUDDY_CARDPUTER_ADV)
+const int W = 240, H = 135;
+const int CY_BASE = H / 2;
+#else
 const int W = 135, H = 240;
-const int CX = W / 2;
 const int CY_BASE = 120;
+#endif
+const int CX = W / 2;
 // StickS3 has no discrete red LED — the legacy blink-on-attention UX is a
 // no-op on this board. Set to -1 so pinMode/digitalWrite calls are gated.
 const int LED_PIN = -1;
@@ -1061,11 +1112,19 @@ void drawHUD() {
 
 void setup() {
   auto cfg = M5.config();
+#if defined(BUDDY_CARDPUTER_ADV)
+  M5Cardputer.begin(cfg, true);   // true = enable TCA8418 keyboard on ADV
+#else
   M5.begin(cfg);
+#endif
   Serial.begin(115200);
   delay(400);    // let USB CDC re-enumerate so the "boot" print isn't lost
   Serial.println("[buddy] boot");
+#if defined(BUDDY_CARDPUTER_ADV)
+  M5.Lcd.setRotation(1);   // ADV is landscape; rotation 1 puts text upright
+#else
   M5.Lcd.setRotation(0);
+#endif
   // M5Unified initializes IMU and Speaker from M5.begin() when present.
   startBt();
   if (LED_PIN >= 0) {
@@ -1115,7 +1174,12 @@ void setup() {
 }
 
 void loop() {
+#if defined(BUDDY_CARDPUTER_ADV)
+  M5Cardputer.update();        // also calls M5.update() and polls keyboard
+#else
   M5.update();
+#endif
+  updateCardputerKbd();        // no-op stub on non-ADV builds
   // M5Unified's Speaker manages tones non-blocking internally — no per-loop
   // update() call needed (was required by the legacy M5.Beep API).
   t++;
@@ -1193,15 +1257,15 @@ void loop() {
   // Button-press wake. Track which button woke the screen so its full
   // press cycle (including long-press) is swallowed — you don't want
   // BtnA-to-wake to also cycle displayMode or open the menu.
-  if (M5.BtnA.isPressed() || M5.BtnB.isPressed()) {
+  if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || kbdEnterDown() || kbdDelDown()) {
     if (screenOff) {
-      if (M5.BtnA.isPressed()) swallowBtnA = true;
-      if (M5.BtnB.isPressed()) swallowBtnB = true;
+      if (M5.BtnA.isPressed() || kbdEnterDown()) swallowBtnA = true;
+      if (M5.BtnB.isPressed() || kbdDelDown())   swallowBtnB = true;
     }
     wake();
   }
 
-  if (M5.BtnA.pressedFor(600) && !btnALong && !swallowBtnA) {
+  if ((M5.BtnA.pressedFor(600) || kbdEnterPressedFor(600)) && !btnALong && !swallowBtnA) {
     btnALong = true;
     beep(800, 60);
     if (resetOpen) { resetOpen = false; }
@@ -1213,7 +1277,7 @@ void loop() {
     }
     Serial.println(menuOpen ? "menu open" : "menu close");
   }
-  if (M5.BtnA.wasReleased()) {
+  if (M5.BtnA.wasReleased() || kbdEnterReleased()) {
     if (!btnALong && !swallowBtnA) {
       if (inPrompt) {
         char cmd[96];
@@ -1245,7 +1309,7 @@ void loop() {
   }
 
   // BtnB: pet → heart
-  if (M5.BtnB.wasPressed()) {
+  if (M5.BtnB.wasPressed() || kbdDelPressed()) {
     if (swallowBtnB) { swallowBtnB = false; }
     else
     if (inPrompt) {
