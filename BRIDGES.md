@@ -20,7 +20,7 @@ one is.
 | Agent           | Bridge form                                  | Status        | Notes                                                              |
 | --------------- | -------------------------------------------- | ------------- | ------------------------------------------------------------------ |
 | Claude          | Claude desktop app (macOS / Windows)         | ✅ shipped    | Developer Mode → Open Hardware Buddy…; see [README.md](README.md). |
-| Claude Code CLI | Tap the CLI session via a companion process  | 💡 proposed   | Would let headless / SSH sessions drive the pet.                   |
+| Claude Code CLI | Companion daemon + Claude Code hook scripts  | ✅ shipped    | [`cc-buddy-bridge`](https://github.com/lu486/cc-buddy-bridge) — Python + `bleak`; round-trips PreToolUse permissions to the device. |
 | OpenAI Codex CLI| Companion process watches `codex` log stream | 💡 proposed   | Needs stable event hooks from Codex CLI.                           |
 | Cursor          | VS Code–style IDE listener                   | 💡 proposed   | Would expose agent runs happening inside Cursor.                   |
 | Cline           | VS Code extension side-channel               | 💡 proposed   | Extension API exposes run state.                                   |
